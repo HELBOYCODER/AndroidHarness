@@ -48,7 +48,10 @@ internal class GithubGpuDelivery(private val context: Context) : GpuDelivery {
     }
     override fun install() {
         if (spec == null || state.value.busy || state.value.phase == GpuInstallPhase.READY) return
-        val request = OneTimeWorkRequestBuilder<GpuDownloadWorker>().setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).build()
+        val constraints = Constraints.Builder().apply {
+            if (!gpuBundledPackageExists(context, spec)) setRequiredNetworkType(NetworkType.CONNECTED)
+        }.build()
+        val request = OneTimeWorkRequestBuilder<GpuDownloadWorker>().setConstraints(constraints).build()
         mutable.value = GpuInstallState(GpuInstallPhase.WAITING, total = spec.downloadBytes)
         preferences.edit().putString("work", request.id.toString()).apply()
         work.enqueueUniqueWork("local-gpu-runtime", ExistingWorkPolicy.KEEP, request)
@@ -66,3 +69,8 @@ internal fun gpuPackage(context: Context): GpuRuntimePackage {
     return context.assets.open("gpu-runtime/$abi.json").bufferedReader().use { GpuRuntimePackage.parse(it.readText(), abi) }
 }
 internal fun gpuLibrary(context: Context, spec: GpuRuntimePackage) = File(context.noBackupFilesDir, "gpu-runtime/${spec.sha256}.so")
+internal fun gpuBundledPackagePath(spec: GpuRuntimePackage) = "gpu-runtime/packages/${spec.asset}"
+internal fun gpuBundledPackageExists(context: Context, spec: GpuRuntimePackage): Boolean =
+    // Listing supports APK-compressed assets without opening/decompressing the runtime.
+    // ponytail: inspect only the exact content-addressed filename, not other ABIs or versions.
+    context.assets.list("gpu-runtime/packages")?.contains(spec.asset) == true
