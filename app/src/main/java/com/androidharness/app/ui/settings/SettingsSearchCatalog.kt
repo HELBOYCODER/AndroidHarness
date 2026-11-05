@@ -28,6 +28,8 @@ private fun control(
 ) = SettingsSearchEntry(title, description, page, keywords, anchor = title, minSdk = minSdk, needsVibrator = needsVibrator, within = within)
 
 internal val settingsControlEntries: List<SettingsSearchEntry> = listOfNotNull(
+    SettingsSearchEntry(R.string.external_harness_title, R.string.external_harness_intro, SettingsPage.CODING,
+        "external harness Claude Code Codex Pi DeepSea SSH remote CLI review هارنس کلود کدکس", anchor = R.string.external_harness_title),
     if (com.androidharness.app.data.FeatureAvailability.HARNESS_GLASS) SettingsSearchEntry(R.string.glass_title, R.string.glass_description, SettingsPage.APPEARANCE,
         "aharness harness glass frosted liquid blur refraction experimental appearance transparent translucent", anchor = R.string.glass_title,
         minSdk = android.os.Build.VERSION_CODES.S) else null,

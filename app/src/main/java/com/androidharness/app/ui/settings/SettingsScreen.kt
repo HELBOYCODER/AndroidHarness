@@ -342,6 +342,7 @@ fun SettingsScreen(
                                 onCodeStart = { value -> scope.launch { container.settings.setCodeStart(value) } },
                             )
                             CodingSection { page -> openPage(page) }
+                            ExternalHarnessSection(container)
                         }
                         SettingsPage.NINE_ROUTER -> NineRouterSection(container)
                         SettingsPage.CONNECTED_ACCOUNTS -> ConnectedAccountsSection(container)

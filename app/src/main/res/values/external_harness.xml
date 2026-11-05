@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="external_harness_title">External harnesses</string>
+    <string name="external_harness_intro">Run a one-shot code review with a CLI installed on your SSH host. These are real coding agents, not model-provider aliases. No automatic installation or Android CLI support is claimed.</string>
+    <string name="external_harness_claude">Claude Code</string>
+    <string name="external_harness_codex">Codex Harness</string>
+    <string name="external_harness_pi">Pi Harness</string>
+    <string name="external_harness_deepsea">DeepSea Harness</string>
+    <string name="external_harness_deepsea_unknown">Not configured: the DeepSea project and protocol have not been identified. It is not assumed to mean DeepSeek.</string>
+    <string name="external_harness_ssh_required">Select an SSH workspace in Workspace settings first. Install the chosen CLI and authenticate on that host; credentials are not copied from app providers. A non-interactive SSH shell must find the CLI on PATH.</string>
+    <string name="external_harness_target">SSH workspace: %1$s</string>
+    <string name="external_harness_check">Check CLI version</string>
+    <string name="external_harness_docs">Official setup guide</string>
+    <string name="external_harness_prompt">Review request</string>
+    <string name="external_harness_prompt_hint">Review the current project and explain potential bugs.</string>
+    <string name="external_harness_trust">I trust this SSH host and its CLI configuration, and allow sending this request and project content to its model provider.</string>
+    <string name="external_harness_limit">Review-only flags are used; app shell approvals do not govern external agents. Host configuration, hooks or MCP servers may have additional permissions. Use a dedicated restricted host account. No edit or permission-bypass mode is offered.</string>
+    <string name="external_harness_run">Run review</string>
+    <string name="external_harness_running">Running on SSH host…</string>
+    <string name="external_harness_busy">Another request is still running. Wait for it to finish.</string>
+    <string name="external_harness_cancel">Disconnect request</string>
+    <string name="external_harness_uncertain">Request disconnected. The remote process may still run; inspect the host before retrying. Leaving this page also disconnects a running request.</string>
+    <string name="external_harness_transient">Results are temporary and are not inserted into chat. Review calls may incur provider charges. Maximum wait: 10 minutes. Closing the connection does not guarantee remote process termination.</string>
+    <string name="external_harness_clear">Clear result</string>
+    <string name="external_harness_error">Request failed: %1$s</string>
+    <string name="external_harness_acknowledge">I inspected the host; no harness request is running</string>
+</resources>

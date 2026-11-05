@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="external_harness_title">هارنس‌های خارجی</string>
+    <string name="external_harness_intro">بازبینی یک‌باره کد با ابزار خط فرمان نصب‌شده روی میزبان SSH. این‌ها عامل‌های واقعی کدنویسی هستند، نه نام‌های نمایشی ارائه‌دهنده مدل. نصب خودکار یا پشتیبانی اجرای مستقیم روی اندروید ادعا نمی‌شود.</string>
+    <string name="external_harness_claude">Claude Code</string>
+    <string name="external_harness_codex">Codex Harness</string>
+    <string name="external_harness_pi">Pi Harness</string>
+    <string name="external_harness_deepsea">DeepSea Harness</string>
+    <string name="external_harness_deepsea_unknown">پیکربندی نشده: پروژه و پروتکل DeepSea شناسایی نشده‌اند؛ آن را معادل DeepSeek فرض نمی‌کنیم.</string>
+    <string name="external_harness_ssh_required">ابتدا در تنظیمات فضای کار، یک فضای SSH انتخاب کنید. ابزار را روی همان میزبان نصب و احراز هویت کنید؛ کلید ارائه‌دهندگان برنامه کپی نمی‌شود. ابزار باید در PATH شل غیرتعاملی SSH قابل دسترسی باشد.</string>
+    <string name="external_harness_target">فضای کار SSH: %1$s</string>
+    <string name="external_harness_check">بررسی نسخه ابزار</string>
+    <string name="external_harness_docs">راهنمای رسمی راه‌اندازی</string>
+    <string name="external_harness_prompt">درخواست بازبینی</string>
+    <string name="external_harness_prompt_hint">پروژه فعلی را بازبینی و ایرادهای احتمالی را توضیح بده.</string>
+    <string name="external_harness_trust">به میزبان SSH و تنظیمات ابزارش اعتماد دارم و اجازه ارسال درخواست و محتوای پروژه به ارائه‌دهنده مدل آن را می‌دهم.</string>
+    <string name="external_harness_limit">گزینه‌های بازبینی استفاده می‌شوند؛ تأییدهای شل برنامه بر عامل خارجی حاکم نیستند. تنظیمات، هوک‌ها و سرورهای MCP میزبان ممکن است دسترسی بیشتری داشته باشند. از حساب محدود و اختصاصی استفاده کنید. حالت ویرایش یا دورزدن مجوز عرضه نمی‌شود.</string>
+    <string name="external_harness_run">اجرای بازبینی</string>
+    <string name="external_harness_running">در حال اجرا روی میزبان SSH…</string>
+    <string name="external_harness_busy">درخواست دیگری هنوز در حال اجراست. تا پایان آن صبر کنید.</string>
+    <string name="external_harness_cancel">قطع ارتباط درخواست</string>
+    <string name="external_harness_uncertain">ارتباط قطع شد. فرایند راه‌دور ممکن است ادامه یابد؛ پیش از تکرار، میزبان را بررسی کنید. خروج از این صفحه نیز ارتباط درخواست فعال را قطع می‌کند.</string>
+    <string name="external_harness_transient">نتایج موقت‌اند و به گفتگو افزوده نمی‌شوند. ارائه‌دهنده ممکن است هزینه دریافت کند. حداکثر انتظار ۱۰ دقیقه است. قطع ارتباط، توقف قطعی فرایند راه‌دور را تضمین نمی‌کند.</string>
+    <string name="external_harness_clear">پاک‌کردن نتیجه</string>
+    <string name="external_harness_error">درخواست ناموفق بود: %1$s</string>
+    <string name="external_harness_acknowledge">میزبان را بررسی کردم؛ هیچ درخواست هارنسی در حال اجرا نیست</string>
+</resources>
