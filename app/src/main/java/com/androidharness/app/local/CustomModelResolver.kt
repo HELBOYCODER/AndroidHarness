@@ -37,7 +37,7 @@ class CustomModelResolver(private val client: OkHttpClient = OkHttpClient.Builde
         val files = root["siblings"]?.jsonArray.orEmpty().mapNotNull { entry ->
             val obj = entry.jsonObject
             val filename = obj["rfilename"]?.jsonPrimitive?.content ?: return@mapNotNull null
-            if (!isChatFile(filename) || link.file != null && link.file != filename) return@mapNotNull null
+            if (!safeFilePath(filename) || !isChatFile(filename) || link.file != null && link.file != filename) return@mapNotNull null
             val lfs = obj["lfs"] as? JsonObject
             val size = obj["size"]?.jsonPrimitive?.longOrNull ?: lfs?.get("size")?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
             val hash = lfs?.get("sha256")?.jsonPrimitive?.content.orEmpty()
@@ -84,23 +84,29 @@ class CustomModelResolver(private val client: OkHttpClient = OkHttpClient.Builde
 
     fun resolveProjector(text: String): LocalModelAsset {
         val link = parseLink(text, projector = true)
-        val url = link.url.toHttpUrlOrNull()!!.newBuilder()
-        if (link.repository != null) {
-            require(link.file != null) { "Paste the matching projector file link, not a repository page." }
-            url.encodedPath("/${link.repository}/resolve/${link.revision}/${link.file}")
-        }
-        val model = inspect(spec(url.build().toString(), link.file?.substringAfterLast('/') ?: "mmproj.gguf", 24, "", text))
+        if (link.repository != null) require(link.file != null) { "Paste the matching projector file link, not a repository page." }
+        val model = inspect(spec(link.url, link.file?.substringAfterLast('/') ?: "mmproj.gguf", 24, "", text))
         return LocalModelAsset(model.filename, model.url, model.bytes, model.sha256)
     }
 
     fun inspect(model: LocalModelSpec): LocalModelSpec {
         if (model.format == LocalModelFormat.SAFETENSORS) return model
-        val request = Request.Builder().url(model.url).header("Range", "bytes=0-${GgufMetadata.PROBE_BYTES - 1}").build()
+        val request = Request.Builder().url(model.url).header("Accept-Encoding", "identity")
+            .header("Range", "bytes=0-${GgufMetadata.PROBE_BYTES - 1}").build()
         return client.newCall(request).execute().use { response ->
             checkResponse(response.code)
             val body = checkNotNull(response.body) { "Empty model response." }
-            val size = if (response.code == 206) response.header("Content-Range")?.substringAfterLast('/')?.toLongOrNull()
-                else body.contentLength().takeIf { it > 0 }
+            require(response.code == 200 || response.code == 206) { "The server did not return a model file." }
+            require(response.header("Content-Encoding").let { it == null || it.equals("identity", true) }) { "The server must return an unencoded GGUF file." }
+            val range = parseContentRange(response.header("Content-Range"))
+            if (response.code == 206) {
+                require(range != null && range.first == 0L && range.total != null &&
+                    range.last <= minOf(range.total - 1, GgufMetadata.PROBE_BYTES.toLong() - 1) &&
+                    (body.contentLength() < 0 || body.contentLength() == range.last + 1)) {
+                    "The server returned an invalid GGUF probe byte range."
+                }
+            }
+            val size = if (response.code == 206) range?.total else body.contentLength().takeIf { it > 0 }
             require(size != null && size >= 24) { "The server must provide the complete GGUF file size." }
             require(model.bytes == 24L || model.bytes == size) { "The file size changed. Paste the link again." }
             val estimate = body.byteStream().use { GgufMetadata.inspect(readPrefix(it, GgufMetadata.PROBE_BYTES)) }
@@ -128,19 +134,31 @@ class CustomModelResolver(private val client: OkHttpClient = OkHttpClient.Builde
         fun parseLink(text: String, format: LocalModelFormat = LocalModelFormat.GGUF, projector: Boolean = false): Link {
             val url = text.trim().toHttpUrlOrNull() ?: error("Paste a valid Hugging Face or HTTPS GGUF link.")
             require(url.isHttps && url.username.isEmpty() && url.password.isEmpty()) { "Use an HTTPS link without a username or password." }
+            require(url.pathSegments.none { segment -> segment.any { it == '\\' || it == '/' || it.isISOControl() } }) { "The model link contains an unsafe path." }
             val clean = url.newBuilder().fragment(null).build()
-            val parts = clean.pathSegments.filter { it.isNotEmpty() }
+            val parts = clean.pathSegments.dropLastWhile { it.isEmpty() }
             if (clean.host in listOf("huggingface.co", "www.huggingface.co")) {
-                require(parts.size >= 2 && parts.take(2).all { it.matches(Regex("[A-Za-z0-9_.-]+")) }) { "Paste a Hugging Face model repository or GGUF file link." }
+                require(clean.port == 443 && parts.size >= 2 && parts.take(2).all {
+                    it.matches(Regex("[A-Za-z0-9_.-]+")) && it != "." && it != ".."
+                }) { "Paste a Hugging Face model repository or GGUF file link." }
                 val repo = parts.take(2).joinToString("/")
-                if (parts.size == 2) return Link(clean.toString(), repo)
-                require(parts.size >= 4 && parts[2] in listOf("blob", "resolve", "tree")) { "Paste a model repository, file page or GGUF download link." }
+                val canonical = clean.newBuilder().host("huggingface.co").query(null).encodedPath("/")
+                parts.take(2).forEach(canonical::addPathSegment)
+                if (parts.size == 2) return Link(canonical.build().toString(), repo)
+                require(parts.size >= 4 && parts[2] in listOf("blob", "resolve", "tree") &&
+                    parts[3].isNotBlank() && parts[3] != "." && parts[3] != "..") { "Paste a model repository, file page or GGUF download link." }
+                require(parts[2] != "tree" || parts.size == 4) { "Use the repository page or a direct GGUF file link, not a subfolder page." }
                 val file = if (parts[2] == "tree") null else parts.drop(4).joinToString("/")
-                require(file == null || (if (format == LocalModelFormat.SAFETENSORS) file.endsWith(".safetensors") else if (projector) file.endsWith(".gguf", true) else isChatFile(file))) { "Choose a single-file chat GGUF, not safetensors, a split model or a vision projector." }
-                return Link(clean.toString(), repo, parts[3], file)
+                require(file == null || safeFilePath(file) && (if (format == LocalModelFormat.SAFETENSORS) file.endsWith(".safetensors") else if (projector) file.endsWith(".gguf", true) else isChatFile(file))) { "Choose a single-file chat GGUF, not safetensors, a split model or a vision projector." }
+                canonical.addPathSegment(if (file == null) "tree" else "resolve").addPathSegment(parts[3])
+                file?.split('/')?.forEach(canonical::addPathSegment)
+                return Link(canonical.build().toString(), repo, parts[3], file)
             }
-            require(format == LocalModelFormat.GGUF && (if (projector) parts.lastOrNull().orEmpty().endsWith(".gguf", true) else isChatFile(parts.lastOrNull().orEmpty()))) { "This must be a direct link to a single .gguf model file." }
+            require(format == LocalModelFormat.GGUF && safeFilePath(parts.joinToString("/")) && (if (projector) parts.lastOrNull().orEmpty().endsWith(".gguf", true) else isChatFile(parts.lastOrNull().orEmpty()))) { "This must be a direct link to a single .gguf model file." }
             return Link(clean.toString())
+        }
+        private fun safeFilePath(name: String): Boolean = name.split('/').all { segment ->
+            segment.isNotBlank() && segment != "." && segment != ".." && segment.none { it == '\\' || it.isISOControl() }
         }
         private fun isChatFile(name: String): Boolean = name.endsWith(".gguf", ignoreCase = true) &&
             !name.substringAfterLast('/').startsWith("mmproj", ignoreCase = true) &&

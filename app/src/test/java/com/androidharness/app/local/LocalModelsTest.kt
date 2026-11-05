@@ -101,7 +101,7 @@ class LocalModelsTest {
         val data = "GGUFfixture".toByteArray()
         val model = fixture(data)
         val store = LocalModelStore(root)
-        assertThrows(IllegalStateException::class.java) { store.install(model, data.dropLast(1).toByteArray().inputStream(), { false }, {}) }
+        assertThrows(RetryableModelDownloadException::class.java) { store.install(model, data.dropLast(1).toByteArray().inputStream(), { false }, {}) }
         assertEquals(data.size - 1L, store.partial(model.id).length())
         assertFalse(store.file(model.id).exists())
     }

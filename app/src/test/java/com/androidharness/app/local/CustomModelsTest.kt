@@ -27,6 +27,38 @@ class CustomModelsTest {
         }
     }
 
+    @Test fun `HF file links canonicalize blob resolve host query and nested encoded filenames`() {
+        val blob = CustomModelResolver.parseLink("https://www.huggingface.co/org/model/blob/main/folder/chat%20Q4.GGUF?download=true#file")
+        val resolve = CustomModelResolver.parseLink("https://huggingface.co/org/model/resolve/main/folder/chat%20Q4.GGUF")
+        assertEquals(resolve, blob)
+        assertEquals("https://huggingface.co/org/model/resolve/main/folder/chat%20Q4.GGUF", blob.url)
+        assertEquals("folder/chat Q4.GGUF", blob.file)
+        val projector = CustomModelResolver.parseLink("https://huggingface.co/org/model/blob/main/mmproj%20Q4.gguf", projector = true)
+        assertEquals("https://huggingface.co/org/model/resolve/main/mmproj%20Q4.gguf", projector.url)
+        listOf("https://huggingface.co:8443/org/model/resolve/main/chat.gguf",
+            "https://huggingface.co/org/model/tree/main/folder",
+            "https://huggingface.co/org/model/resolve/main/folder%2Fchat.gguf",
+            "https://huggingface.co/org/model/resolve/main/a%5Cb.gguf",
+            "https://example.org/a%00.gguf",
+            "https://huggingface.co/org/model/resolve/main//chat.gguf").forEach { link ->
+            assertThrows(Exception::class.java) { CustomModelResolver.parseLink(link) }
+        }
+    }
+
+    @Test fun `probe rejects wrong offsets contradictory totals encoding and non file success`() {
+        val bytes = header()
+        for ((code, range, encoding) in listOf(Triple(206, "bytes 1-${bytes.size}/2048", null),
+            Triple(206, "bytes 0-${bytes.size - 1}/1", null), Triple(206, "bytes 0-${bytes.size - 1}/*", null),
+            Triple(200, null, "gzip"), Triple(204, null, null))) {
+            val client = OkHttpClient.Builder().addInterceptor { chain ->
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(code).message("Fixture")
+                    .apply { range?.let { header("Content-Range", it) }; encoding?.let { header("Content-Encoding", it) } }
+                    .body(bytes.toResponseBody()).build()
+            }.build()
+            assertThrows(IllegalArgumentException::class.java) { CustomModelResolver(client).resolve("https://example.org/model.gguf") }
+        }
+    }
+
     @Test fun `HF file lookup pins revision hash and nested file and excludes unsupported files`() {
         val resolver = CustomModelResolver()
         val page = CustomModelResolver.parseLink("https://huggingface.co/org/model")
@@ -73,6 +105,42 @@ class CustomModelsTest {
                 .body("<html>this is a file page</html>".toResponseBody()).build()
         }.build()
         assertThrows(IllegalArgumentException::class.java) { CustomModelResolver(htmlClient).resolve("https://example.org/model.gguf") }
+    }
+
+    @Test fun `HF blob import resolves pinned asset and publishes only verified installed bytes`() = temporary { root ->
+        val bytes = header()
+        val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        val sha = "a".repeat(40)
+        val requests = mutableListOf<String>()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            requests += request.url.toString()
+            val body = if (request.url.encodedPath.startsWith("/api/models/")) {
+                """{"sha":"$sha","siblings":[{"rfilename":"folder/chat q4.gguf","size":${bytes.size},"lfs":{"sha256":"$hash"}}]}""".toByteArray()
+            } else bytes
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body(body.toResponseBody()).build()
+        }.build()
+        val resolver = CustomModelResolver(client)
+        val model = resolver.inspect(resolver.resolve("https://www.huggingface.co/org/model/blob/main/folder/chat%20q4.gguf?download=true").single())
+        assertEquals("org/model", model.repository)
+        assertEquals(sha, model.revision)
+        assertEquals(hash, model.sha256)
+        assertEquals(bytes.size.toLong(), model.bytes)
+        val registry = CustomModelRegistry(root)
+        registry.add(model)
+        val store = LocalModelStore(root) { registry.models.firstOrNull { model -> model.id == it } }
+        assertFalse(store.installed(model))
+        LocalModelTransfer(client).transfer(model.url, model.bytes, 0) { source, offset ->
+            store.install(model, source, { false }, {}, offset)
+        }
+        assertTrue(store.installed(model))
+        val reloaded = CustomModelRegistry(root).models.single()
+        assertEquals(model, reloaded)
+        assertTrue(store.installed(reloaded))
+        assertArrayEquals(bytes, store.file(model.id).readBytes())
+        assertTrue(requests.first().startsWith("https://huggingface.co/api/models/org/model/revision/main?"))
+        assertTrue(requests.drop(1).all { it == "https://huggingface.co/org/model/resolve/$sha/folder/chat%20q4.gguf" })
     }
 
     @Test fun `unsupported saved formats preserve GGUF entries and source files`() = temporary { root ->

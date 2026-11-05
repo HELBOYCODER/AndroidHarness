@@ -12,7 +12,9 @@ internal fun parseContentRange(header: String?): ContentRange? {
     val match = Regex("bytes (\\d+)-(\\d+)/(\\d+|\\*)").matchEntire(header?.trim().orEmpty()) ?: return null
     val first = match.groupValues[1].toLongOrNull() ?: return null
     val last = match.groupValues[2].toLongOrNull() ?: return null
-    return ContentRange(first, last, match.groupValues[3].toLongOrNull()).takeIf { last >= first }
+    val totalText = match.groupValues[3]
+    val total = if (totalText == "*") null else totalText.toLongOrNull() ?: return null
+    return ContentRange(first, last, total).takeIf { last >= first && (total == null || total > last) }
 }
 
 class LocalModelStore(private val root: File, private val find: (String) -> LocalModelSpec? = LocalModelCatalog::find) {
@@ -39,6 +41,8 @@ class LocalModelStore(private val root: File, private val find: (String) -> Loca
                 else File(source, asset.filename + PART).takeIf { it.isFile && it.length() < asset.bytes }?.length() ?: 0L
             }
         }
+        // ponytail: unpinned direct URLs without a checksum restart — upgrade when persisted ETag/If-Range validation is available.
+        if (model.sha256.isEmpty()) return 0L
         return partial(model.id).takeIf { it.isFile && it.length() < model.bytes }?.length() ?: 0L
     }
 
@@ -49,7 +53,8 @@ class LocalModelStore(private val root: File, private val find: (String) -> Loca
     fun discardStale(model: LocalModelSpec) {
         if (installed(model)) { clearPartial(model.id); return }
         removeFile(File(root, "${partial(model.id).name}.unquantized"))
-        removeFile(File(root, "${projectorFile(model.id).name}.part"))
+        val projectorPart = File(root, "${projectorFile(model.id).name}.part")
+        if (model.projector == null || projectorPart.length() >= model.projector.bytes) removeFile(projectorPart)
         val part = partial(model.id)
         if (model.format == LocalModelFormat.SAFETENSORS) {
             // The conversion output is never resumable. The downloaded source files are.
@@ -90,6 +95,7 @@ class LocalModelStore(private val root: File, private val find: (String) -> Loca
         var count = 0L
         if (offset > 0) part.inputStream().use { existing ->
             while (count < offset) {
+                check(!isCancelled()) { "Download cancelled." }
                 val read = existing.read(buffer, 0, minOf(buffer.size.toLong(), offset - count).toInt())
                 check(read > 0) { "Partial download is damaged. Restart the download." }
                 digest.update(buffer, 0, read); count += read
@@ -125,7 +131,7 @@ class LocalModelStore(private val root: File, private val find: (String) -> Loca
         try {
             val (count, digest) = copyInto(file, start, asset.bytes, source, isCancelled, progress)
             check(!isCancelled()) { "Incomplete or cancelled download." }
-            check(count == asset.bytes) { "Incomplete or cancelled download." }
+            if (count != asset.bytes) throw RetryableModelDownloadException("Incomplete model file. Resume to continue where it stopped.")
             verifying = true
             val hash = digest.digest().joinToString("") { "%02x".format(it) }
             check(asset.sha256.isEmpty() || hash == asset.sha256) { "Model file checksum mismatch." }
@@ -160,7 +166,7 @@ class LocalModelStore(private val root: File, private val find: (String) -> Loca
             throw e
         }
         check(!isCancelled()) { "Download cancelled." }
-        check(count == model.bytes) { "Incomplete download. Resume to continue where it stopped." }
+        if (count != model.bytes) throw RetryableModelDownloadException("Incomplete download. Resume to continue where it stopped.")
         try {
             val magic = target.inputStream().use { readPrefix(it, 4) }
             check(magic.contentEquals(byteArrayOf(71, 71, 85, 70))) { "Not a GGUF model." }

@@ -37,13 +37,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Call
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import java.io.File
 import java.io.InputStream
 import java.security.MessageDigest
 import java.util.UUID
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class LocalModelManager(private val context: Context) {
@@ -118,8 +115,7 @@ class LocalModelManager(private val context: Context) {
     val status = _status.asStateFlow()
     private val _running = MutableStateFlow<String?>(null)
     val running = _running.asStateFlow()
-    private val client = OkHttpClient.Builder().connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS).followSslRedirects(false).build()
+    private val modelTransfer = LocalModelTransfer()
 
     init {
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO).launch {
@@ -127,7 +123,8 @@ class LocalModelManager(private val context: Context) {
                 models.value.forEach { model ->
                     runCatching {
                         store.discardStale(model)
-                        if (store.file(model.id).exists() && !store.installed(model)) store.remove(model.id)
+                        // A missing projector must not discard an already verified, multi-GB main model.
+                        if (store.file(model.id).exists() && store.file(model.id).length() != model.bytes) store.remove(model.id)
                     }.onFailure { setStatus(model.id, it.message ?: "Storage cleanup failed") }
                 }
                 root.listFiles()?.filter { it.name.startsWith("file-import-") }?.forEach { it.deleteRecursively() }
@@ -202,16 +199,36 @@ class LocalModelManager(private val context: Context) {
                 setStatus(id, if (resume > 0) "Resuming" else "Connecting")
                 try {
                     var lastUpdate = 0L
-                    transfer(id, model.url, model.bytes, resume, stopped) { input, offset ->
-                        store.install(model, input, { cancelled.get() || stopped() }, { count ->
-                            val now = System.currentTimeMillis()
-                            if (now - lastUpdate >= 500 || count == model.bytes) {
-                                lastUpdate = now
-                                setStatus(id, if (count == model.bytes) "Verifying" else "Downloading ${count * 100 / model.bytes}%")
-                                kotlinx.coroutines.runBlocking { progress(count, model.bytes) }
-                            }
-                        }, offset)
+                    if (!store.file(id).let { it.isFile && it.length() == model.bytes }) {
+                        transfer(id, model.url, model.bytes, resume, stopped) { input, offset ->
+                            store.install(model, input, { cancelled.get() || stopped() }, { count ->
+                                val now = System.currentTimeMillis()
+                                if (now - lastUpdate >= 500 || count == model.bytes) {
+                                    lastUpdate = now
+                                    setStatus(id, if (count == model.bytes) "Verifying" else "Downloading ${localDownloadPercent(count, model.bytes)}%")
+                                    kotlinx.coroutines.runBlocking { progress(count, model.bytes) }
+                                }
+                            }, offset)
+                        }
                     }
+                    model.projector?.let { asset ->
+                        val target = store.projectorFile(id)
+                        if (!target.isFile || target.length() != asset.bytes) {
+                            setStatus(id, "Downloading vision projector")
+                            val part = File(root, "${target.name}.part")
+                            val offset = part.takeIf { asset.sha256.isNotEmpty() && it.isFile && it.length() < asset.bytes }?.length() ?: 0L
+                            transfer(id, asset.url, asset.bytes, offset, stopped) { input, start ->
+                                store.installAsset(asset, input, target, { cancelled.get() || stopped() }, part, start) { count ->
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastUpdate >= 500 || count == asset.bytes) {
+                                        lastUpdate = now
+                                        kotlinx.coroutines.runBlocking { progress(count, asset.bytes) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    check(store.installed(model)) { "Model installation is incomplete. Resume the download." }
                     publishInstalled()
                     progress(model.bytes, model.bytes)
                     setStatus(id, "Installed")
@@ -230,28 +247,14 @@ class LocalModelManager(private val context: Context) {
      */
     private fun transfer(modelId: String, url: String, total: Long, existing: Long, stopped: () -> Boolean,
         consume: (InputStream, Long) -> Unit) {
-        var offset = existing
-        while (true) {
-            val call = client.newCall(Request.Builder().url(url).apply { if (offset > 0) header("Range", "bytes=$offset-") }.build())
+        modelTransfer.transfer(url, total, existing, onCall = { call ->
             synchronized(gate) {
                 check(modelId !in blocked && !stopped() && !cancelled.get()) { "Download cancelled." }
                 downloadCall = call; activeId = modelId
             }
-            try {
-                val restart = call.execute().use { response ->
-                    val range = parseContentRange(response.header("Content-Range"))
-                    val resumed = offset > 0 && response.code == 206 && range?.first == offset && range.total == total
-                    if (offset > 0 && (response.code == 416 || response.code == 206 && !resumed)) return@use true
-                    check(response.isSuccessful) { "Model server returned HTTP ${response.code}. Retry later." }
-                    val body = checkNotNull(response.body) { "Empty download." }
-                    check(resumed || body.contentLength() < 0 || body.contentLength() == total) { "Unexpected model size." }
-                    consume(body.byteStream(), if (resumed) offset else 0L)
-                    false
-                }
-                if (!restart) return
-                offset = 0
-            } finally { synchronized(gate) { downloadCall = null } }
-        }
+        }, onFinished = { call ->
+            synchronized(gate) { if (downloadCall === call) downloadCall = null }
+        }, consume = consume)
     }
 
     internal fun interruptDownload(id: String) {
@@ -262,19 +265,9 @@ class LocalModelManager(private val context: Context) {
 
     private suspend fun transferAsset(modelId: String, asset: LocalModelAsset, target: File, stopped: () -> Boolean,
         progress: (Long) -> Unit) {
-        val call = client.newCall(Request.Builder().url(asset.url).build())
-        synchronized(gate) {
-            check(modelId !in blocked && !stopped() && !cancelled.get()) { "Download cancelled." }
-            downloadCall = call; activeId = modelId
+        transfer(modelId, asset.url, asset.bytes, 0, stopped) { source, _ ->
+            store.installAsset(asset, source, target, { cancelled.get() || stopped() }, progress = progress)
         }
-        try {
-            call.execute().use { response ->
-                check(response.isSuccessful) { "Model source returned HTTP ${response.code}." }
-                val body = checkNotNull(response.body)
-                check(body.contentLength() < 0 || body.contentLength() == asset.bytes) { "Model source changed file size." }
-                body.byteStream().use { source -> store.installAsset(asset, source, target, { cancelled.get() || stopped() }, progress = progress) }
-            }
-        } finally { synchronized(gate) { downloadCall = null } }
     }
 
     private suspend fun installSafetensors(model: LocalModelSpec, stopped: () -> Boolean, progress: suspend (Long, Long) -> Unit) {
@@ -296,7 +289,8 @@ class LocalModelManager(private val context: Context) {
                 // A file with its final name was verified before it was renamed, so it is never fetched twice.
                 if (finished.isFile && finished.length() == asset.bytes) { completed += asset.bytes; return@forEach }
                 val part = File(source, asset.filename + ".part")
-                val existing = part.takeIf { it.isFile && it.length() < asset.bytes }?.length() ?: 0L
+                val existing = part.takeIf { (asset.sha256.isNotEmpty() || model.revision.matches(Regex("[a-f0-9]{40}"))) &&
+                    it.isFile && it.length() < asset.bytes }?.length() ?: 0L
                 setStatus(model.id, if (existing > 0) "Resuming ${asset.filename}" else "Downloading ${asset.filename}")
                 var lastUpdate = 0L
                 transfer(model.id, asset.url, asset.bytes, existing, stopped) { input, offset ->

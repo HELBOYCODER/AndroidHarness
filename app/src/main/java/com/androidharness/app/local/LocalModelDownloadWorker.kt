@@ -25,16 +25,17 @@ class LocalModelDownloadWorker(context: Context, params: WorkerParameters) : Cor
         return try {
             setForeground(foreground(model.title))
             container.runtimePolicy.whileAllowed { kotlinx.coroutines.coroutineScope {
+                val finished = java.util.concurrent.atomic.AtomicBoolean(false)
                 val cancellation = launch(kotlinx.coroutines.Dispatchers.Default, start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
                     try { kotlinx.coroutines.awaitCancellation() }
-                    finally { manager.interruptDownload(modelId) }
+                    finally { if (!finished.get()) manager.interruptDownload(modelId) }
                 }
                 try {
                     manager.install(modelId, { isStopped }) { received, total ->
                         setProgress(workDataOf("received" to received, "total" to total))
-                        if (com.androidharness.app.AppNotifications.enabled(applicationContext)) setForeground(foreground(model.title, (received * 100 / total).toInt()))
+                        if (com.androidharness.app.AppNotifications.enabled(applicationContext)) setForeground(foreground(model.title, localDownloadPercent(received, total)))
                     }
-                } finally { cancellation.cancel() }
+                } finally { finished.set(true); cancellation.cancel() }
             } }
             Result.success()
         } catch (_: com.androidharness.app.BackgroundExecutionDisabled) {

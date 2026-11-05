@@ -38,6 +38,14 @@ class LocalModelManagementTest {
         assertTrue(seen.first() > stored)
     }
 
+    @Test fun `unhashed direct URLs never resume potentially changed bytes`() = temporary { root ->
+        val model = fixture(data).copy(custom = true, sha256 = "")
+        val store = LocalModelStore(root)
+        store.partial(model.id).writeBytes(data.copyOf(100))
+        assertEquals(0L, store.resumableBytes(model))
+        assertEquals(100L, store.partial(model.id).length())
+    }
+
     @Test fun `a resume offset that does not match the file on disk restarts cleanly`() = temporary { root ->
         val model = fixture(data)
         val store = LocalModelStore(root)
@@ -56,6 +64,37 @@ class LocalModelManagementTest {
         assertTrue(error.message!!.contains("checksum"))
         assertFalse(store.partial(model.id).exists())
         assertFalse(store.file(model.id).exists())
+    }
+
+    @Test fun `cancelling during prefix hashing preserves bytes without consuming network suffix`() = temporary { root ->
+        val model = fixture(data)
+        val store = LocalModelStore(root)
+        store.partial(model.id).writeBytes(data.copyOf(100))
+        var read = false
+        val source = object : java.io.InputStream() {
+            override fun read(): Int { read = true; return -1 }
+        }
+        assertThrows(IllegalStateException::class.java) {
+            store.install(model, source, { true }, {}, resumeFrom = 100)
+        }
+        assertFalse(read)
+        assertEquals(100L, store.partial(model.id).length())
+    }
+
+    @Test fun `projector interruption preserves verified main model and resumable projector prefix`() = temporary { root ->
+        val model = fixture(data).copy(projector = LocalModelAsset("mmproj.gguf", "https://example.org/mmproj.gguf", 100, "b".repeat(64)))
+        val store = LocalModelStore(root)
+        store.file(model.id).writeBytes(data)
+        val part = File(root, store.projectorFile(model.id).name + ".part")
+        part.writeBytes(ByteArray(10))
+        assertFalse(store.installed(model))
+        store.discardStale(model)
+        assertArrayEquals(data, store.file(model.id).readBytes())
+        assertEquals(10L, part.length())
+        store.projectorFile(model.id).writeBytes(ByteArray(100))
+        store.discardStale(model)
+        assertTrue(store.installed(model))
+        assertFalse(part.exists())
     }
 
     @Test fun `asset resume keeps parts on interruption and renames only after verification`() = temporary { root ->
@@ -121,8 +160,30 @@ class LocalModelManagementTest {
         assertEquals(ContentRange(100, 199, 1000), parseContentRange("bytes 100-199/1000"))
         assertEquals(ContentRange(0, 9, null), parseContentRange("bytes 0-9/*"))
         assertNull(parseContentRange("bytes 5-1/10"))
+        assertNull(parseContentRange("bytes 0-10/10"))
+        assertNull(parseContentRange("bytes 0-0/0"))
+        assertNull(parseContentRange("bytes 0-9/99999999999999999999999999"))
+        assertNull(parseContentRange("bytes 0-99999999999999999999999999/10"))
         assertNull(parseContentRange("items 0-1/2"))
         assertNull(parseContentRange(null))
+    }
+
+    @Test fun `early EOF is retryable and keeps GGUF and asset prefixes`() = temporary { root ->
+        val model = fixture(data)
+        val store = LocalModelStore(root)
+        assertThrows(RetryableModelDownloadException::class.java) {
+            store.install(model, data.copyOf(100).inputStream(), { false }, {})
+        }
+        assertEquals(100L, store.resumableBytes(model))
+        assertFalse(store.installed(model))
+        val asset = LocalModelAsset("weights.safetensors", "https://example.org/file", 500, "")
+        val target = File(root, asset.filename)
+        val part = File(root, asset.filename + ".part")
+        assertThrows(RetryableModelDownloadException::class.java) {
+            store.installAsset(asset, ByteArray(100).inputStream(), target, { false }, part) {}
+        }
+        assertEquals(100L, part.length())
+        assertFalse(target.exists())
     }
 
     @Test fun `storage report separates models unfinished downloads leftovers and other files`() = temporary { root ->
