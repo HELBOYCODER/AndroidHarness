@@ -21,6 +21,13 @@ plugins {
 // AGP resolves a pinned version only from <sdk>/ndk/<version>, so a foreign
 // ANDROID_NDK_HOME (CI images export one) must not enable the native block.
 val pinnedNdk = "27.2.12479018"
+// ponytail: an optional ABI list bounds build time and APK size — upgrade when distributing to other CPU architectures.
+val supportedNativeAbis = listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+val selectedNativeAbis = providers.gradleProperty("nativeAbis").orNull
+    ?.split(',')?.map(String::trim)?.distinct() ?: supportedNativeAbis
+require(selectedNativeAbis.isNotEmpty() && selectedNativeAbis.all { it in supportedNativeAbis }) {
+    "nativeAbis must be a comma-separated subset of $supportedNativeAbis"
+}
 val githubBuildProperties = Properties().apply {
     rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
 }
@@ -55,6 +62,9 @@ android {
             }
         }
     } else {
+        check(!providers.gradleProperty("requireNative").map(String::toBoolean).getOrElse(false)) {
+            "This distribution requires NDK $pinnedNdk: refusing an APK without local inference."
+        }
         logger.warn("app: NDK $pinnedNdk not found, configuring without native code (libharness_local.so)")
     }
 
@@ -67,7 +77,7 @@ android {
         buildConfigField("String", "GITHUB_CLIENT_ID", "\"$githubClientId\"")
         buildConfigField("boolean", "PLAY_DISTRIBUTION", (distributionChannel == "play").toString())
         if (hasNdk) {
-            ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64") }
+            ndk { abiFilters += selectedNativeAbis }
             externalNativeBuild {
                 cmake { arguments += listOf("-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON", "-DHARNESS_GPU_OUTPUT=${layout.buildDirectory.dir("generated/gpuNative").get().asFile}") }
             }
@@ -264,6 +274,7 @@ dependencies {
 // The hash is bundled in the base app, so neither a changed release manifest nor
 // a replaced download can authorize different executable code.
 abstract class PrepareGpuRuntime @Inject constructor(private val execOps: ExecOperations) : DefaultTask() {
+    @get:Input abstract val nativeAbis: ListProperty<String>
     @get:InputDirectory abstract val nativeDirectory: DirectoryProperty
     @get:Optional @get:InputDirectory abstract val externalPackages: DirectoryProperty
     @get:InputFile abstract val stripTool: RegularFileProperty
@@ -273,13 +284,13 @@ abstract class PrepareGpuRuntime @Inject constructor(private val execOps: ExecOp
 
     @TaskAction fun prepare() {
         listOf(assetDirectory, packageDirectory, featureDirectory).forEach { it.get().asFile.deleteRecursively(); it.get().asFile.mkdirs() }
-        for (abi in listOf("armeabi-v7a", "x86")) {
+        for (abi in nativeAbis.get().filter { it in listOf("armeabi-v7a", "x86") }) {
             val stub = featureDirectory.file("$abi/libharness_gpu_unavailable.so").get().asFile
             stub.parentFile.mkdirs()
             nativeDirectory.file("$abi/libharness_gpu_unavailable.so").get().asFile.copyTo(stub, overwrite = true)
             execOps.exec { commandLine(stripTool.get().asFile, "--strip-unneeded", stub) }.assertNormalExitValue()
         }
-        for (abi in listOf("arm64-v8a", "x86_64")) {
+        for (abi in nativeAbis.get().filter { it in listOf("arm64-v8a", "x86_64") }) {
             val source = nativeDirectory.file("$abi/libggml-vulkan.so").get().asFile
             val library = featureDirectory.file("$abi/libggml-vulkan.so").get().asFile
             library.parentFile.mkdirs()
@@ -314,6 +325,7 @@ if (hasNdk) androidComponents.onVariants { variant ->
     val sdk = githubBuildProperties.getProperty("sdk.dir") ?: System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
     val strip = fileTree("$sdk/ndk/$pinnedNdk/toolchains/llvm/prebuilt") { include("*/bin/llvm-strip", "*/bin/llvm-strip.exe") }.singleFile
     val prepare = tasks.register<PrepareGpuRuntime>("prepareGpuRuntime$capital") {
+        nativeAbis.set(selectedNativeAbis)
         dependsOn(tasks.matching { it.name == "externalNativeBuild$capital" })
         nativeDirectory.set(layout.buildDirectory.dir("generated/gpuNative/${if (variant.buildType == "debug") "Debug" else "RelWithDebInfo"}"))
         providers.gradleProperty("gpuRuntimePackages").orNull?.let { externalPackages.set(file(it)) }
