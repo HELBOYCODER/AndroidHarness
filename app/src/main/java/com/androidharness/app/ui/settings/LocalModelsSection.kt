@@ -252,7 +252,9 @@ private fun ColumnScope.LocalModelsContent(container: AppContainer, scrollConten
                             container.settings.setActiveModel(null)
                             container.settings.setActiveProvider(LocalModelCatalog.PROVIDER_PREFIX + model.id)
                         }
-                        manager.load(model.id)
+                        // ponytail: selecting a new model is metadata-only. A second tap on
+                        // the selected card's explicit Load button still supports preloading.
+                        if (selected) manager.load(model.id)
                         message = context.getString(R.string.settings_local_models_selected_for_chat, model.title)
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) { if (!e.message.orEmpty().contains("stopped", ignoreCase = true)) message = e.message }

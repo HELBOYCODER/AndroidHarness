@@ -2,6 +2,7 @@
 #include "llama.h"
 #include "ggml-backend.h"
 #include "local_request.h"
+#include "local_limits.h"
 #include <algorithm>
 #include <atomic>
 #include <memory>
@@ -27,8 +28,9 @@ void fail(JNIEnv * env, const char * message) {
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_androidharness_app_local_LocalNative_create(JNIEnv *, jobject) {
-    return reinterpret_cast<jlong>(new Request());
+Java_com_androidharness_app_local_LocalNative_create(JNIEnv * env, jobject) {
+    try { return reinterpret_cast<jlong>(new Request()); }
+    catch (const std::exception & error) { fail(env, error.what()); return 0; }
 }
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_androidharness_app_local_LocalNative_loadBackend(JNIEnv * env, jobject, jstring path) {
@@ -59,8 +61,8 @@ Java_com_androidharness_app_local_LocalNative_generate(
         auto * request = reinterpret_cast<Request *>(handle);
         std::call_once(initialized, [] { llama_backend_init(); });
         if (aborted(request)) throw std::runtime_error("Local generation stopped.");
-        if (contextSize < 1 || inputLimit < 1 || outputLimit < 1 ||
-            int64_t(inputLimit) + outputLimit > contextSize || threads < 1)
+        local_limits::validate(contextSize, inputLimit, outputLimit, threads, threads);
+        if (int64_t(inputLimit) + outputLimit > contextSize)
             throw std::runtime_error("Invalid local model limits.");
         auto params = llama_model_default_params();
         ggml_backend_dev_t devices[] = {nullptr};

@@ -37,7 +37,14 @@ data class LocalModelSpec(
     val modelPage get() = sourcePage ?: "https://huggingface.co/$repository"
     val defaultContext get() = minOf(2048, maxContext)
     val downloadBytes get() = (if (assets.isEmpty()) bytes else assets.sumOf { it.bytes }) + (projector?.bytes ?: 0)
-    fun estimatedMemory(context: Int): Long = bytes + (projector?.bytes ?: 0) + 640L * 1024 * 1024 + context.toLong() * kvBytesPerToken
+    fun estimatedMemory(context: Int): Long {
+        // Malformed imported metadata must not wrap an estimate into a small/negative value.
+        if (bytes < 0 || (projector?.bytes ?: 0) < 0 || context < 0 || kvBytesPerToken < 0) return Long.MAX_VALUE
+        return try {
+            Math.addExact(Math.addExact(bytes, projector?.bytes ?: 0),
+                Math.addExact(640L * 1024 * 1024, Math.multiplyExact(context.toLong(), kvBytesPerToken)))
+        } catch (_: ArithmeticException) { Long.MAX_VALUE }
+    }
 }
 
 object LocalModelCatalog {
@@ -58,7 +65,7 @@ object LocalModelCatalog {
             "7dabda4d13d513e3e842b20f0d435c732f172cbe", "qwen2.5-3b-instruct-q4_k_m.gguf",
             2104932768, "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
             6, 73728, "Higher quality, larger download and more heat.", "Qwen Research License"),
-    ) + LocalModelRecommendations.models
+    ) + LocalUncensoredModels.models + LocalModelRecommendations.models
     fun find(id: String) = models.firstOrNull { it.id == id }
     const val PROVIDER_PREFIX = "local-model:"
     fun isLocal(id: String) = id.startsWith(PROVIDER_PREFIX)
@@ -81,11 +88,10 @@ data class LocalModelLimits(
     val thinkingMode: LocalThinkingMode = LocalThinkingMode.AUTO,
 ) {
     fun validate() {
-        require(context > 0) { "Context must be a positive number." }
-        require(input > 0 && output > 0) { "Input and output must be positive numbers." }
-        require(input.toLong() + output < Int.MAX_VALUE) { "The combined token budget exceeds the engine's addressable range." }
-        require(threads > 0) { "CPU threads must be a positive number." }
-        require(promptThreads == null || promptThreads > 0) { "Prompt threads must be a positive number." }
+        require(context in 1..LocalRuntimeSafety.MAX_CONTEXT) { "Context must be between 1 and ${LocalRuntimeSafety.MAX_CONTEXT} tokens." }
+        require(input in 1..LocalRuntimeSafety.MAX_CONTEXT && output in 1..LocalRuntimeSafety.MAX_CONTEXT) { "Input and output must be between 1 and ${LocalRuntimeSafety.MAX_CONTEXT} tokens." }
+        require(threads in 1..LocalRuntimeSafety.MAX_THREADS) { "CPU threads must be between 1 and ${LocalRuntimeSafety.MAX_THREADS}." }
+        require(promptThreads == null || promptThreads in 1..LocalRuntimeSafety.MAX_THREADS) { "Prompt threads must be between 1 and ${LocalRuntimeSafety.MAX_THREADS}." }
     }
 }
 
@@ -112,13 +118,13 @@ data class LocalDeviceProfile(
         !lowMemory && availableRam >= model.estimatedMemory(context) + 256L * 1024 * 1024
 }
 
-/** Estimates inform consent, never decide whether the user may try a model. */
+/** Recommendation warnings are separate from last-moment runtime admission checks. */
 fun localModelWarnings(model: LocalModelSpec, device: LocalDeviceProfile, limits: LocalModelLimits,
     downloading: Boolean = false): List<String> = buildList {
     if (!device.supported) add("This device architecture has no local engine. Downloading is possible, but inference may fail.")
     if (!device.canLoad(model, limits.context)) add("Estimated model memory exceeds the recommended budget or available RAM. Android may close the app, and generation may fail.")
     if (limits.context > model.maxContext) add("Context exceeds the model's trained length. Answers may degrade or the engine may fail.")
-    if (limits.input.toLong() + limits.output > limits.context) add("Input plus output exceeds the saved context. The engine will offer to expand it when needed, using more memory.")
+    if (limits.input.toLong() + limits.output > limits.context) add("Input plus output exceeds the saved context. Long conversations will stop with a recoverable error; raise the context explicitly or shorten the conversation.")
     if (limits.threads > device.cores) add("More threads than CPU cores may make generation slower and increase heat.")
     val storage = if (model.format == LocalModelFormat.SAFETENSORS) model.downloadBytes * 3 else model.downloadBytes
     if (downloading && device.freeStorage < storage + 256L * 1024 * 1024) add("Free storage may be insufficient for download${if (model.format == LocalModelFormat.SAFETENSORS) " and conversion" else ""}. The operation may fail.")

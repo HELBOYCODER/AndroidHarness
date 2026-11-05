@@ -4,9 +4,16 @@ import androidx.annotation.Keep
 
 @Keep
 object LocalNative {
-    init {
+    private val initialization = runCatching {
         System.loadLibrary("harness_local")
         if (android.os.Process.is64Bit()) check(loadBackend("libggml-cpu.so")) { "CPU inference backend could not load." }
+    }
+
+    /** Linker/ABI failures are recoverable UI errors; this does not catch native signals. */
+    fun ensureAvailable() {
+        initialization.exceptionOrNull()?.let {
+            throw IllegalStateException("The local engine is unavailable on this device. Install a compatible 64-bit build.", it)
+        }
     }
     external fun loadBackend(path: String): Boolean
     external fun gpuDevice(): String

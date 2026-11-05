@@ -1,5 +1,6 @@
 #include <jni.h>
 #include "local_request.h"
+#include "local_limits.h"
 #include "llama.h"
 #include "ggml-backend.h"
 #include "chat.h"
@@ -122,6 +123,10 @@ Java_com_androidharness_app_local_LocalNative_loadModel(JNIEnv * env, jobject, j
         initialize_backend();
         load_model(jbytes(env, path), bool(gpu), reinterpret_cast<LocalRequest *>(handle));
     } catch (const std::exception & e) {
+        // The operation lock has unwound before this handler. Do not retain a
+        // partially initialized model/KV cache after allocation/decode failures.
+        std::lock_guard<std::mutex> lock(model_mutex);
+        clear_model();
         if (!env->ExceptionCheck()) env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), e.what());
     }
 }
@@ -142,7 +147,7 @@ Java_com_androidharness_app_local_LocalNative_benchmark(JNIEnv * env, jobject, j
             env->DeleteLocalRef(name);
             if (env->ExceptionCheck() || !keep) throw std::runtime_error("Benchmark stopped.");
         };
-        if (threads < 1 || promptThreads < 1) throw std::runtime_error("Thread counts must be positive.");
+        local_limits::validate(512, 480, 32, threads, promptThreads);
         initialize_backend();
         load_model(jbytes(env, path), bool(gpu), request);
         // A benchmark must not reuse or alter a conversation's KV cache.
@@ -211,6 +216,10 @@ Java_com_androidharness_app_local_LocalNative_benchmark(JNIEnv * env, jobject, j
         env->SetByteArrayRegion(bytes, 0, result.size(), reinterpret_cast<const jbyte *>(result.data()));
         return bytes;
     } catch (const std::exception & e) {
+        // The operation lock has unwound before this handler. Do not retain a
+        // partially initialized model/KV cache after allocation/decode failures.
+        std::lock_guard<std::mutex> lock(model_mutex);
+        clear_model();
         if (!env->ExceptionCheck()) env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), e.what());
         return nullptr;
     }
@@ -237,8 +246,7 @@ Java_com_androidharness_app_local_LocalNative_generateChat(
             if (env->ExceptionCheck() || !keep) throw std::runtime_error("Local generation stopped.");
         };
         auto stage = [&](const char * value) { invoke(eventMethod, json({{"status", value}}).dump()); };
-        if (requestedContext < 1 || inputLimit < 1 || outputLimit < 1 || threads < 1 || promptThreads < 1)
-            throw std::runtime_error("Context, token budgets and threads must be positive.");
+        local_limits::validate(requestedContext, inputLimit, outputLimit, threads, promptThreads);
         stage("Loading model");
         stage(useGpu ? "Loading model on GPU (Vulkan)" : "Loading model on CPU");
         load_model(jbytes(env, path), bool(useGpu), request);
@@ -308,13 +316,10 @@ Java_com_androidharness_app_local_LocalNative_generateChat(
                 throw std::runtime_error("Could not tokenize chat.");
             promptCount = promptPositions = count;
         }
-        const int64_t required = std::max<int64_t>(promptCount, promptPositions) + outputLimit;
-        if (required >= INT_MAX) throw std::runtime_error("The requested context exceeds the engine's addressable token range.");
-        int contextSize = std::max<int64_t>(requestedContext, required);
-        if (promptCount > inputLimit || required > requestedContext) {
-            invoke(warningMethod, "This conversation exceeds your saved token budget. Continue with " + std::to_string(contextSize) +
-                " context tokens? This uses more RAM and may fail or cause Android to close the app.");
-        }
+        // ponytail: never enlarge a user-selected KV cache implicitly, even after a warning.
+        // The Android admission check only budgeted RAM for requestedContext.
+        local_limits::require_prompt_fits(promptCount, promptPositions, inputLimit, outputLimit, requestedContext);
+        const int contextSize = requestedContext;
         if (contextSize > llama_model_n_ctx_train(model.get())) {
             invoke(warningMethod, "This model was trained for " + std::to_string(llama_model_n_ctx_train(model.get())) +
                 " context tokens. Continue with " + std::to_string(contextSize) + "? Answers may degrade or generation may fail.");
@@ -329,7 +334,10 @@ Java_com_androidharness_app_local_LocalNative_generateChat(
             for (size_t i = 0; i < mtmd_input_chunks_size(chunks.get()); ++i) {
                 auto * chunk = mtmd_input_chunks_get(chunks.get(), i);
                 if (mtmd_decode_use_non_causal(vision.get(), chunk)) {
-                    cp.n_ubatch = std::max<uint32_t>(cp.n_ubatch, mtmd_input_chunk_get_n_tokens(chunk));
+                    const auto imageTokens = mtmd_input_chunk_get_n_tokens(chunk);
+                    if (imageTokens > static_cast<uint32_t>(contextSize))
+                        throw std::runtime_error("Image batch exceeds the selected context. Resize the image or raise limits explicitly.");
+                    cp.n_ubatch = std::max<uint32_t>(cp.n_ubatch, imageTokens);
                 }
             }
             cp.n_batch = std::max(cp.n_batch, cp.n_ubatch);
@@ -444,6 +452,10 @@ Java_com_androidharness_app_local_LocalNative_generateChat(
         env->SetByteArrayRegion(data, 0, result.size(), reinterpret_cast<const jbyte *>(result.data()));
         return data;
     } catch (const std::exception & e) {
+        // The operation lock has unwound before this handler. Do not retain a
+        // partially initialized model/KV cache after allocation/decode failures.
+        std::lock_guard<std::mutex> lock(model_mutex);
+        clear_model();
         if (!env->ExceptionCheck()) env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), e.what());
         return nullptr;
     }

@@ -53,7 +53,7 @@ class LocalModelManager(private val context: Context) {
     }
     suspend fun releaseCachedModel() = withContext(Dispatchers.IO) {
         inference.withLock {
-            if (Process.is64Bit()) LocalNative.releaseCachedModel()
+            if (Process.is64Bit() && _loaded.value != null) LocalNative.releaseCachedModel()
             _loaded.value?.let { id -> _status.update { it - id } }
             _loaded.value = null
         }
@@ -63,7 +63,7 @@ class LocalModelManager(private val context: Context) {
     suspend fun stopAndUnload(id: String) = withContext(Dispatchers.IO + NonCancellable) {
         stop(id)
         inference.withLock {
-            if (Process.is64Bit() && LocalNative.isModelCached(store.file(id).absolutePath.toByteArray(Charsets.UTF_8))) {
+            if (Process.is64Bit() && _loaded.value == id && LocalNative.isModelCached(store.file(id).absolutePath.toByteArray(Charsets.UTF_8))) {
                 LocalNative.releaseCachedModel()
                 _loaded.value = null
             }
@@ -490,12 +490,38 @@ class LocalModelManager(private val context: Context) {
         }
     }
 
+    /** Called under inference: reject unsafe allocation before entering the native engine. */
+    private suspend fun prepareRuntime(model: LocalModelSpec, limits: LocalModelLimits, reuseWeights: Boolean = true) {
+        currentCoroutineContext().ensureActive()
+        check(store.installed(model)) { "Local model is not installed. Download it in Settings > Local models." }
+        LocalNative.ensureAvailable()
+        if (_loaded.value != null && (!reuseWeights || _loaded.value != model.id)) {
+            LocalNative.releaseCachedModel()
+            _loaded.value?.let { previous -> _status.update { it - previous } }
+            _loaded.value = null
+        }
+        LocalRuntimeSafety.requireCanRun(model, limits, device(), weightsResident = _loaded.value == model.id)
+        currentCoroutineContext().ensureActive()
+    }
+
+    private suspend fun <T> withNativeCancellation(id: String, block: () -> T): T = coroutineScope {
+        val finished = AtomicBoolean(false)
+        val watcher = launch(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+            try { awaitCancellation() } finally { if (!finished.get()) stop(id) }
+        }
+        try {
+            currentCoroutineContext().ensureActive()
+            block().also { currentCoroutineContext().ensureActive() }
+        } finally { finished.set(true); watcher.cancel() }
+    }
+
     suspend fun load(id: String) = withContext(Dispatchers.IO) {
         inference.withLock {
             val model = requireNotNull(find(id)) { "Unknown local model." }
             val limits = limits(id)
             limits.validate()
             confirmResources(model, limits)
+            prepareRuntime(model, limits)
             val experimental = com.androidharness.app.data.SettingsRepository(context).settings.first().localModelExperimental
             val useGpu = LocalAccelerationPolicy.useGpu(experimental, limits.backend,
                 experimental && limits.backend != LocalBackend.CPU && runCatching { gpuSupport.device().isNotBlank() }.getOrDefault(false))
@@ -507,12 +533,16 @@ class LocalModelManager(private val context: Context) {
                 setStatus(id, if (useGpu) "Loading model on GPU (Vulkan)" else "Loading model on CPU")
                 var actualGpu = useGpu
                 try {
-                    LocalNative.loadModel(request, store.file(id).absolutePath.toByteArray(Charsets.UTF_8), useGpu)
+                    withNativeCancellation(id) {
+                        LocalNative.loadModel(request, store.file(id).absolutePath.toByteArray(Charsets.UTF_8), useGpu)
+                    }
                 } catch (e: Exception) {
                     if (!LocalAccelerationPolicy.retryOnCpu(useGpu, false,
                             e is CancellationException || LocalNative.isCancelled(request))) throw e
                     actualGpu = false
-                    LocalNative.loadModel(request, store.file(id).absolutePath.toByteArray(Charsets.UTF_8), false)
+                    withNativeCancellation(id) {
+                        LocalNative.loadModel(request, store.file(id).absolutePath.toByteArray(Charsets.UTF_8), false)
+                    }
                 }
                 _loaded.value = id
                 setStatus(id, if (actualGpu) "Ready · GPU (Vulkan)" else if (useGpu) context.getString(com.androidharness.app.R.string.local_gpu_ready_fallback) else "Ready · CPU")
@@ -537,6 +567,7 @@ class LocalModelManager(private val context: Context) {
             val limits = limits(id)
             limits.validate()
             confirmResources(model, limits)
+            prepareRuntime(model, limits.copy(context = 512, input = 480, output = 32))
             val counts = localBenchmarkThreadCounts(device().cores, limits.threads, limits.promptThreads ?: limits.threads)
             val backends = when (mode) {
                 LocalBenchmarkMode.CPU -> listOf(LocalBackend.CPU)
@@ -639,6 +670,7 @@ class LocalModelManager(private val context: Context) {
         val limits = withContext(Dispatchers.IO) { limits(id) }
         limits.validate()
         confirmResources(model, limits)
+        withContext(Dispatchers.IO) { prepareRuntime(model, limits, reuseWeights = false) }
         synchronized(gate) {
             check(id !in blocked && store.installed(model)) { "Local model is not installed. Download it in Settings > Local models." }
             handle = LocalNative.create()
@@ -686,6 +718,7 @@ class LocalModelManager(private val context: Context) {
         val limits = withContext(Dispatchers.IO) { limits(id) }
         limits.validate()
         confirmResources(model, limits)
+        withContext(Dispatchers.IO) { prepareRuntime(model, limits) }
         val experimental = com.androidharness.app.data.SettingsRepository(context).settings.first().localModelExperimental
         val gpu = withContext(Dispatchers.IO) {
             LocalAccelerationPolicy.useGpu(experimental, limits.backend,
