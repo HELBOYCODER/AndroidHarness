@@ -315,7 +315,8 @@ abstract class PrepareGpuRuntime @Inject constructor(private val execOps: ExecOp
             if (supplied == null) GZIPOutputStream(packageDirectory.file(name).get().asFile.outputStream()).use { output -> library.inputStream().use { it.copyTo(output) } }
             else { check(supplied.name == name) { "GPU package hash does not match its filename" }; supplied.copyTo(packageDirectory.file(name).get().asFile, overwrite = true) }
             if (bundleRuntime.get()) {
-                val bundled = assetDirectory.file("gpu-runtime/packages/$name").get().asFile
+                // AAPT transparently inflates .gz assets and removes that suffix. Keep gzip bytes opaque.
+                val bundled = assetDirectory.file("gpu-runtime/packages/$name.bin").get().asFile
                 bundled.parentFile.mkdirs()
                 packageDirectory.file(name).get().asFile.copyTo(bundled, overwrite = true)
             }

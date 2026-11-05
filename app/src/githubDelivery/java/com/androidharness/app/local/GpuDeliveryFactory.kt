@@ -69,8 +69,9 @@ internal fun gpuPackage(context: Context): GpuRuntimePackage {
     return context.assets.open("gpu-runtime/$abi.json").bufferedReader().use { GpuRuntimePackage.parse(it.readText(), abi) }
 }
 internal fun gpuLibrary(context: Context, spec: GpuRuntimePackage) = File(context.noBackupFilesDir, "gpu-runtime/${spec.sha256}.so")
-internal fun gpuBundledPackagePath(spec: GpuRuntimePackage) = "gpu-runtime/packages/${spec.asset}"
+// The .bin suffix prevents AAPT from inflating .gz assets and renaming them during packaging.
+internal fun gpuBundledPackagePath(spec: GpuRuntimePackage) = "gpu-runtime/packages/${spec.asset}.bin"
 internal fun gpuBundledPackageExists(context: Context, spec: GpuRuntimePackage): Boolean =
     // Listing supports APK-compressed assets without opening/decompressing the runtime.
     // ponytail: inspect only the exact content-addressed filename, not other ABIs or versions.
-    context.assets.list("gpu-runtime/packages")?.contains(spec.asset) == true
+    context.assets.list("gpu-runtime/packages")?.contains("${spec.asset}.bin") == true
