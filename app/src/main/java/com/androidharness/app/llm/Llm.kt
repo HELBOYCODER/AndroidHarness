@@ -3,6 +3,7 @@ package com.androidharness.app.llm
 import com.androidharness.app.core.ChatMessage
 import com.androidharness.app.core.ToolCallData
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -274,12 +275,15 @@ object ProviderFactory {
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
+                // Socket close during cancellation is not a provider failure.
+                coroutineContext.ensureActive()
                 close(e)
             }
         }
         awaitClose {
-            call.cancel()
+            // Cancel the reader first so a synchronous SocketException cannot race into close(e).
             reader.cancel()
+            call.cancel()
         }
     }.flowOn(Dispatchers.IO)
 
