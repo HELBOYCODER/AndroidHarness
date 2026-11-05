@@ -31,6 +31,23 @@ if(ANDROID AND NOT ANDROID_ABI STREQUAL "arm64-v8a" AND NOT ANDROID_ABI STREQUAL
     return()
 endif()
 include(FetchContent)
+# Optional local archives still pass the exact upstream hash checks below.
+# This avoids build-host DNS/CDN failures without changing shipped source revisions.
+set(HARNESS_NATIVE_ARCHIVES "$ENV{HARNESS_NATIVE_ARCHIVES}" CACHE PATH "Verified native source archives")
+function(harness_archive output archive fallback)
+    if(HARNESS_NATIVE_ARCHIVES AND EXISTS "${HARNESS_NATIVE_ARCHIVES}/${archive}")
+        set(${output} "${HARNESS_NATIVE_ARCHIVES}/${archive}" PARENT_SCOPE)
+    else()
+        set(${output} "${fallback}" PARENT_SCOPE)
+    endif()
+endfunction()
+harness_archive(HARNESS_VULKAN_URL vulkan.tar.gz "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/v1.4.363")
+harness_archive(HARNESS_SPIRV_URL spirv.tar.gz "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/vulkan-sdk-1.4.341.0")
+harness_archive(HARNESS_LLAMA_URL llama.tar.gz "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/19cce6919992fdffd92e0ac152caaf1e2b8f254e")
+if(HARNESS_NATIVE_ARCHIVES AND EXISTS "${HARNESS_NATIVE_ARCHIVES}/kleidiai.tar.gz")
+    FetchContent_Declare(kleidiai URL "${HARNESS_NATIVE_ARCHIVES}/kleidiai.tar.gz"
+        URL_HASH MD5=05f1953428ffe8e8c7f585dc6d508887)
+endif()
 set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -59,10 +76,10 @@ set(GGML_F16C OFF CACHE BOOL "" FORCE)
 # Vulkan uses Android's system driver; build-time headers/shader tools stay off-device.
 if(ANDROID AND (ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64"))
     FetchContent_Declare(vulkan_headers
-        URL https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/v1.4.363
+        URL "${HARNESS_VULKAN_URL}"
         URL_HASH SHA256=cbaf687d3c59b9666fe080e7f8396b6b4f4d344a768ee6b337c59852f4526b68)
     FetchContent_Declare(spirv_headers
-        URL https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/vulkan-sdk-1.4.341.0
+        URL "${HARNESS_SPIRV_URL}"
         URL_HASH SHA256=cab0a654c4917e16367483296b44cdb1d614e3120c721beafcd37e3a8580486c)
     FetchContent_MakeAvailable(vulkan_headers spirv_headers)
     set(Vulkan_INCLUDE_DIR "${vulkan_headers_SOURCE_DIR}/include" CACHE PATH "" FORCE)
@@ -80,7 +97,7 @@ endif()
 set(LLAMA_REVISION 19cce6919992fdffd92e0ac152caaf1e2b8f254e)
 FetchContent_Declare(llama
     BINARY_DIR "${CMAKE_BINARY_DIR}/llama-${LLAMA_REVISION}"
-    URL https://codeload.github.com/ggml-org/llama.cpp/tar.gz/19cce6919992fdffd92e0ac152caaf1e2b8f254e
+    URL "${HARNESS_LLAMA_URL}"
     URL_HASH SHA256=e16c6d1076af7a2bdb351e22176dd4b302f244ac4c3822604e2ec64a8a783d44
 )
 FetchContent_MakeAvailable(llama)
