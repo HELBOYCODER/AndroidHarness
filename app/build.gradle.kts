@@ -275,6 +275,7 @@ dependencies {
 // a replaced download can authorize different executable code.
 abstract class PrepareGpuRuntime @Inject constructor(private val execOps: ExecOperations) : DefaultTask() {
     @get:Input abstract val nativeAbis: ListProperty<String>
+    @get:Input abstract val bundleRuntime: Property<Boolean>
     @get:InputDirectory abstract val nativeDirectory: DirectoryProperty
     @get:Optional @get:InputDirectory abstract val externalPackages: DirectoryProperty
     @get:InputFile abstract val stripTool: RegularFileProperty
@@ -313,6 +314,11 @@ abstract class PrepareGpuRuntime @Inject constructor(private val execOps: ExecOp
             val name = "gpu-$abi-$digest.so.gz"
             if (supplied == null) GZIPOutputStream(packageDirectory.file(name).get().asFile.outputStream()).use { output -> library.inputStream().use { it.copyTo(output) } }
             else { check(supplied.name == name) { "GPU package hash does not match its filename" }; supplied.copyTo(packageDirectory.file(name).get().asFile, overwrite = true) }
+            if (bundleRuntime.get()) {
+                val bundled = assetDirectory.file("gpu-runtime/packages/$name").get().asFile
+                bundled.parentFile.mkdirs()
+                packageDirectory.file(name).get().asFile.copyTo(bundled, overwrite = true)
+            }
             val manifest = assetDirectory.file("gpu-runtime/$abi.json").get().asFile
             manifest.parentFile.mkdirs()
             manifest.writeText("""{"schema":1,"abi":"$abi","sha256":"$digest","bytes":${library.length()},"asset":"$name","downloadBytes":${packageDirectory.file(name).get().asFile.length()}}""")
@@ -326,6 +332,7 @@ if (hasNdk) androidComponents.onVariants { variant ->
     val strip = fileTree("$sdk/ndk/$pinnedNdk/toolchains/llvm/prebuilt") { include("*/bin/llvm-strip", "*/bin/llvm-strip.exe") }.singleFile
     val prepare = tasks.register<PrepareGpuRuntime>("prepareGpuRuntime$capital") {
         nativeAbis.set(selectedNativeAbis)
+        bundleRuntime.set(providers.gradleProperty("bundleGpuRuntime").map(String::toBoolean).getOrElse(false))
         dependsOn(tasks.matching { it.name == "externalNativeBuild$capital" })
         nativeDirectory.set(layout.buildDirectory.dir("generated/gpuNative/${if (variant.buildType == "debug") "Debug" else "RelWithDebInfo"}"))
         providers.gradleProperty("gpuRuntimePackages").orNull?.let { externalPackages.set(file(it)) }
